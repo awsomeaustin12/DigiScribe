@@ -29,6 +29,7 @@ class DataRecieving():
 
 
 
+
 if __name__ == "__main__":
     network = DataRecieving()
     dataframes = np.array(
