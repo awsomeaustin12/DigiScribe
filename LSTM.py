@@ -16,6 +16,9 @@ def rand_arr(a, b, *args):
     np.random.seed(a,b, *args)
     return np.random.rand(*args)* (b-a) + a
 
+
+
+
 class LSTMParam:
     def __init__(self, mem_cell_ct, x_dim):
         self.mem_cell_ct = mem_cell_ct
@@ -92,8 +95,113 @@ class LSTMParam:
             self.xc = None
 
         def bottom_data_is(self, x, s_prev=None, h_prev = None):
+            #for the first LSTM node in the network
+            if s_prev is None: s_prev = np.zeros_like(self.state.s)
+            if h_prev is None: h_prev = np.zeros_like(self.state.h)
 
-            
+            #save data for use in backpropogatiojn
+            self.s_prev = s_prev
+            self.h_prev = h_prev
+
+
+            #concatenate x(t) and h(t-1)
+            xc = np.hstack((x, h_prev))
+            self.state.g = np.tanh(np.dot(self.param.wg, xc) + self.param.bg)
+            self.state.i = sigmoid(np.dot(self.param.wi, xc) + self.param.bi)
+            self.state.f = sigmoid(np.dot(self.param.wf, xc) + self.param.bf)
+            self.state.o = sigmoid(np.dot(self.param.wo, xc) + self.param.bo)
+            self.state.s = self.state.g * self.state.i + s_prev * self.state.f
+            self.state.h = self.state.s * self.state.o
+
+            self.xc = xc
+
+
+        def top_diff_is(self, top_diff_h, top_diff_s):
+            #notice that the top_diff_s is carried along the constant error carousel
+            ds = self.state.o * top_diff_h + top_diff_s
+            do = self.state.s * top_diff_h
+            di = self.state.g * ds
+            dg = self.state.i * ds
+            df = self.s_prev * ds
+
+            #diffs with respect to the vectors inside sigma tanh fucntion
+            di_input = sigmoid_derivative(self.state.i) * di
+            df_input = sigmoid_derivative(self.state.f) * df
+            do_input = sigmoid_derivative(self.state.o) * do
+            dg_input = sigmoid_derivative(self.state.g)  *dg
+
+            #diffs w.r.t to inputs
+            self.param.wi_diff += np.outer(di_input,self.xc)
+            self.param.wf_diff += np.outer(df_input,self.xc)
+            self.param.wo_diff += np.outer(do_input,self.xc)
+            self.param.wg_diff += np.outer(dg_input,self.xc)
+            self.param.bi_diff += di_input
+            self.param.bf_diff += df_input
+            self.param.bo_doff += do_input
+            self.param.bg_diff += dg_input
+
+            #compute bottom diff
+            dxc = np.zeros_like(self.xc)
+            dxc += np.dot(self.param.wi.T,di_input)
+            dxc += np.dot(self.param.wf.T,df_input)
+            dxc += np.dot(self.param.wo.T,do_input)
+            dxc += np.dot(self.param.wg.T,dg_input)
+
+            #save bottom diffs
+            self.state.bottom_diff_s = ds * self.state.f
+            self.state.bottom_diff_h = dxc[self.param.x_dim:]
+
+
+    class LstmNetwork():
+        def __init__(self, lstm_param):
+            self.lstm_param = lstm_param
+            self.lstm_node_list = []
+            #input sequence
+            self.x_list = []
+
+        def y_list_is(self, y_list, loss_layer):
+            assert len(y_list) == len(self.x_list)
+            idx = len(self.x_list)
+            #first node only gets diffs from label
+            loss = loss_layer.loss(self.lstm_node_list[idx].state.h, y_list[idx])
+            diff_h = loss_layer.bottom_diff(self.lstm_node_list[idx].state.h,y_list[idx])
+            #here s is no affecting loss due to h(t+1), hence we set equal to zero
+            diff_s = np.zeros(self.lstm_param.mem_cell_ct)
+            self.lstm_node_list[idx].top_diff_is(diff_h,diff_s)
+            idx -= 1
+
+            #following nodes also get diffs from next nodes, hence we add diffs to diff_h
+            #we also prpogate error along constant error carousel using diff_s
+            while idx >= 0:
+                loss += loss_layer.loss(self.lstm_node_list[idx].state.h, y_list[idx])
+                diff_h = loss_layer.bottom_diff(self.lstm_node_list[idx].state.h,y_list[idx])
+                diff_h += self.lstm_node_list[idx+1].state.bottom_diff_h
+                diff_s = self.lstm_node_list[idx+1].state.bottom_diff_s
+                self.lstm_node_list[idx].top_diff_is(diff_h,diff_s)
+                idx -=1
+
+            return loss
+
+        def x_list_clear(self):
+            self.x_list = []
+
+        def x_list_add(self,x):
+            self.x_list.append(x)
+            if len(self.x_list)>len(self.lstm_node_list):
+                #need to add lstm node, create new state mem
+                lstm_state = LstmState(self.lstm_param.mem_cell_ct, self.lstm_param.x_dim)
+                self.lstm_node_list.append(LstmNode(self.lstm_param,lstm_state))
+
+            #get index of most recent x input
+            idx = len(self.x_list) -1
+            if idx == 0:
+                #no reccureent inputs yet
+                self.lstm_node_list[idx].bottom_data_is(x)
+            else:
+                s_prev = self.lstm_node_list[idx-1].state.s
+                h_prev = self.lstm_node_list[idx-1].state.h
+                self.lstm_node_list[idx].bottom_data_is(x,s_prev,h_prev)
+
 
 
 
